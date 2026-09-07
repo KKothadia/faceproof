@@ -1,0 +1,13 @@
+streamlit
+opencv-contrib-python==4.10.0.84
+numpy
+pydantic
+python-dotenv
+pytest
+google-search-results
+web3
+py-solc-x
+pandas
+requests
+Pillow
+

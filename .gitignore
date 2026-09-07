@@ -1,0 +1,34 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest
+.pytest_cache/
+
+# Streamlit
+.streamlit/
+
+# Models
+models/*.onnx
+models/*.caffemodel
+models/*.prototxt
+
+# Data
+artifacts/*
+!artifacts/.gitkeep
+input/*
+!input/.gitkeep
+
+# IDE
+.vscode/
+.idea/

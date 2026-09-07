@@ -1,0 +1,105 @@
+import os
+import pytest
+from unittest.mock import patch, MagicMock
+
+from src.pipeline import FaceProofPipeline
+from src.schemas import PipelineResult, SearchCandidate, FaceResult, VerificationResult
+
+@pytest.fixture
+def mock_dependencies():
+    with patch("src.pipeline.FaceAnalyzer") as mock_face, \
+         patch("src.pipeline.SerpApiClient") as mock_search, \
+         patch("src.pipeline.CandidateVerifier") as mock_verify, \
+         patch("src.pipeline.EvidencePackager") as mock_packager, \
+         patch("src.pipeline.BlockchainClient") as mock_blockchain, \
+         patch("src.pipeline.cv2.imread") as mock_imread, \
+         patch("src.pipeline.cv2.imdecode") as mock_imdecode, \
+         patch("builtins.open", new_callable=MagicMock) as mock_open:
+             
+        mock_imdecode.return_value = "dummy_image"
+        
+        # When context manager is entered, return the mock file object which returns bytes on read
+        mock_file = MagicMock()
+        mock_file.read.return_value = b"fakebytes"
+        mock_open.return_value.__enter__.return_value = mock_file
+        
+        yield mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open
+
+def test_pipeline_fails_on_no_face(mock_dependencies):
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    
+    # Analyze returns no face
+    mock_face.return_value.analyze_image.return_value = []
+    
+    with patch("os.path.exists", return_value=True):
+        pipeline = FaceProofPipeline()
+        result = pipeline.run("dummy.jpg")
+        
+    assert result.status == "NO_FACE"
+    # Ensure SerpApi search is NEVER called when face detection fails
+    mock_search.return_value.search_local_image.assert_not_called()
+    # Ensure blockchain is NEVER called when earlier stages fail
+    mock_blockchain.return_value.anchor_evidence.assert_not_called()
+
+def test_pipeline_fails_on_no_candidates(mock_dependencies):
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    
+    mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
+    mock_search.return_value.search_local_image.return_value = []
+    
+    with patch("os.path.exists", return_value=True):
+        pipeline = FaceProofPipeline()
+        result = pipeline.run("dummy.jpg")
+        
+    assert result.status == "NO_CANDIDATES"
+    mock_blockchain.return_value.anchor_evidence.assert_not_called()
+
+def test_pipeline_fails_on_no_match(mock_dependencies):
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    
+    mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
+    mock_search.return_value.search_local_image.return_value = [SearchCandidate(url="http", source="src")]
+    
+    vr = VerificationResult(
+        is_match=False, confidence_score=0.1, candidate=SearchCandidate(url="http", source="src"),
+        number_of_faces=1, threshold=0.363, pass_reason="Low", artifact_path="path"
+    )
+    mock_verify.return_value.verify_candidates.return_value = [vr]
+    
+    with patch("os.path.exists", return_value=True):
+        pipeline = FaceProofPipeline()
+        result = pipeline.run("dummy.jpg")
+        
+    assert result.status == "NO_MATCH"
+    mock_blockchain.return_value.anchor_evidence.assert_not_called()
+
+def test_pipeline_success_flow(mock_dependencies):
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    
+    mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
+    mock_search.return_value.search_local_image.return_value = [SearchCandidate(url="http", source="src")]
+    
+    vr = VerificationResult(
+        is_match=True, confidence_score=0.9, candidate=SearchCandidate(url="http", source="src"),
+        number_of_faces=1, threshold=0.363, pass_reason="High", artifact_path="path"
+    )
+    mock_verify.return_value.verify_candidates.return_value = [vr]
+    
+    class MockManifest:
+        discovered_image_sha256 = "dummy_sha256"
+        
+    mock_packager.return_value.create_manifest.return_value = (MockManifest(), "manifest_hash")
+    
+    mock_blockchain.return_value.anchor_evidence.return_value = ("0xTxHash", "Success")
+    mock_blockchain.return_value.verify_against_chain.return_value = (True, "Chain match")
+    mock_blockchain.return_value.read_record.return_value = {"record": "test"}
+    
+    with patch("os.path.exists", return_value=True):
+        pipeline = FaceProofPipeline()
+        result = pipeline.run("dummy.jpg")
+        
+    assert result.status == "SUCCESS"
+    assert result.final_verified is True
+    assert result.transaction_hash == "0xTxHash"
+    # Blockchain MUST be called exactly once
+    mock_blockchain.return_value.anchor_evidence.assert_called_once_with(evidence_hash="manifest_hash", media_hash="dummy_sha256")
