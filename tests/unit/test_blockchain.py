@@ -57,28 +57,109 @@ def test_failed_transaction(mock_account, mock_w3):
 
 @patch("src.blockchain.client.Web3")
 @patch("src.blockchain.client.Account")
-def test_verify_mismatch(mock_account, mock_w3):
+def test_read_record_matching_bytes(mock_account, mock_w3):
+    mock_w3.to_bytes.side_effect = lambda hexstr: bytes.fromhex(hexstr.removeprefix("0x"))
     client = BlockchainClient(private_key="dummy_valid_key", contract_address="0x123")
     
-    # Mock read_record directly to test verification logic strictly
-    with patch.object(client, "read_record") as mock_read:
-        mock_read.return_value = {
-            "evidenceHash": "abcd",
-            "mediaHash": "efgh",
-            "timestamp": 123456789,
-            "submitter": "0xSubmitter"
-        }
-        
-        # Test exact match
-        valid, msg = client.verify_against_chain("abcd", "efgh")
-        assert valid is True
-        
-        # Test evidence mismatch
-        valid, msg = client.verify_against_chain("wrong", "efgh")
-        assert valid is False
-        assert "Evidence hash mismatch" in msg
-        
-        # Test media mismatch
-        valid, msg = client.verify_against_chain("abcd", "wrong")
-        assert valid is False
-        assert "Media hash mismatch" in msg
+    ev_hex = "0d2294d1f8da3da3976e250dda452c820f5fa9dc56aca9f563cb50e95dad8639"
+    md_hex = "511c448fdb056175bb2bd7af9e1758e007e627782378fb6b4ce17db10d32bd51"
+    
+    ev_bytes = bytes.fromhex(ev_hex)
+    md_bytes = bytes.fromhex(md_hex)
+    
+    mock_contract = MagicMock()
+    mock_contract.functions.verifyEvidence.return_value.call.return_value = (
+        ev_bytes,
+        md_bytes,
+        1788793322,
+        "0xc375Da0BA71F33EF3b936BE0c6D9663eD76844b4"
+    )
+    client.contract = mock_contract
+    client.w3.to_hex.return_value = "0x" + md_hex
+    
+    # Test 1 - matching bytes
+    valid, msg = client.verify_against_chain(ev_hex, md_hex)
+    assert valid is True
+    assert "Verified on-chain" in msg
+
+@patch("src.blockchain.client.Web3")
+@patch("src.blockchain.client.Account")
+def test_read_record_mismatching_stored_hash(mock_account, mock_w3):
+    mock_w3.to_bytes.side_effect = lambda hexstr: bytes.fromhex(hexstr.removeprefix("0x"))
+    client = BlockchainClient(private_key="dummy_valid_key", contract_address="0x123")
+    
+    ev_hex = "0d2294d1f8da3da3976e250dda452c820f5fa9dc56aca9f563cb50e95dad8639"
+    ev_bytes = bytes.fromhex(ev_hex)
+    md_bytes = bytes.fromhex("511c448fdb056175bb2bd7af9e1758e007e627782378fb6b4ce17db10d32bd51")
+    
+    wrong_ev_bytes = bytes.fromhex("1111111111111111111111111111111111111111111111111111111111111111")
+    
+    mock_contract = MagicMock()
+    mock_contract.functions.verifyEvidence.return_value.call.return_value = (
+        wrong_ev_bytes,
+        md_bytes,
+        1788793322,
+        "0xc375Da0BA71F33EF3b936BE0c6D9663eD76844b4"
+    )
+    client.contract = mock_contract
+    
+    # Test 2 - mismatching stored hash
+    valid, msg = client.verify_against_chain(ev_hex, "511c448fdb056175bb2bd7af9e1758e007e627782378fb6b4ce17db10d32bd51")
+    assert valid is False
+    assert "Stored evidence hash mismatch" in msg
+
+@patch("src.blockchain.client.Web3")
+@patch("src.blockchain.client.Account")
+def test_read_record_zero_timestamp(mock_account, mock_w3):
+    mock_w3.to_bytes.side_effect = lambda hexstr: bytes.fromhex(hexstr.removeprefix("0x"))
+    client = BlockchainClient(private_key="dummy_valid_key", contract_address="0x123")
+    
+    ev_hex = "0d2294d1f8da3da3976e250dda452c820f5fa9dc56aca9f563cb50e95dad8639"
+    ev_bytes = bytes.fromhex(ev_hex)
+    md_bytes = bytes.fromhex("511c448fdb056175bb2bd7af9e1758e007e627782378fb6b4ce17db10d32bd51")
+    
+    mock_contract = MagicMock()
+    mock_contract.functions.verifyEvidence.return_value.call.return_value = (
+        ev_bytes,
+        md_bytes,
+        0,
+        "0xc375Da0BA71F33EF3b936BE0c6D9663eD76844b4"
+    )
+    client.contract = mock_contract
+    
+    # Test 3 - zero timestamp
+    valid, msg = client.verify_against_chain(ev_hex, "511c448fdb056175bb2bd7af9e1758e007e627782378fb6b4ce17db10d32bd51")
+    assert valid is False
+    assert "not found on chain (zero timestamp)" in msg
+
+@patch("src.blockchain.client.Web3")
+@patch("src.blockchain.client.Account")
+def test_read_record_optional_0x_prefix(mock_account, mock_w3):
+    mock_w3.to_bytes.side_effect = lambda hexstr: bytes.fromhex(hexstr.removeprefix("0x"))
+    client = BlockchainClient(private_key="dummy_valid_key", contract_address="0x123")
+    
+    ev_hex = "0d2294d1f8da3da3976e250dda452c820f5fa9dc56aca9f563cb50e95dad8639"
+    md_hex = "511c448fdb056175bb2bd7af9e1758e007e627782378fb6b4ce17db10d32bd51"
+    
+    ev_bytes = bytes.fromhex(ev_hex)
+    md_bytes = bytes.fromhex(md_hex)
+    
+    mock_contract = MagicMock()
+    mock_contract.functions.verifyEvidence.return_value.call.return_value = (
+        ev_bytes,
+        md_bytes,
+        1788793322,
+        "0xc375Da0BA71F33EF3b936BE0c6D9663eD76844b4"
+    )
+    client.contract = mock_contract
+    client.w3.to_hex.return_value = "0x" + md_hex
+    
+    # Test 4 - optional 0x prefix
+    # Call with 0x prefix for evidence and media hashes
+    valid_with_prefix, msg_with_prefix = client.verify_against_chain("0x" + ev_hex, "0x" + md_hex)
+    
+    assert valid_with_prefix is True
+    assert "Verified on-chain" in msg_with_prefix
+    
+    # Contract should be called with identical exact bytes32 representation
+    mock_contract.functions.verifyEvidence.assert_called_with(ev_bytes)

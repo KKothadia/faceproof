@@ -150,20 +150,38 @@ class BlockchainClient:
         if not self.contract:
             raise BlockchainError("Contract address is not configured.")
             
-        try:
-            ev_hash_bytes = Web3.to_bytes(hexstr=evidence_hash)
-            record = self.contract.functions.verifyEvidence(ev_hash_bytes).call()
+        normalized = evidence_hash.removeprefix("0x").lower()
+        if len(normalized) != 64:
+            raise BlockchainError(f"Invalid evidence hash length: expected 64 hex characters, got {len(normalized)}")
             
-            return {
-                "evidenceHash": self.w3.to_hex(record[0])[2:],
-                "mediaHash": self.w3.to_hex(record[1])[2:],
-                "timestamp": record[2],
-                "submitter": record[3]
-            }
+        try:
+            ev_hash_bytes = Web3.to_bytes(hexstr="0x" + normalized)
+        except ValueError:
+            raise BlockchainError(f"Invalid evidence hash format: {evidence_hash}")
+            
+        if len(ev_hash_bytes) != 32:
+            raise BlockchainError(f"Invalid evidence hash byte length: expected 32, got {len(ev_hash_bytes)}")
+            
+        try:
+            record = self.contract.functions.verifyEvidence(ev_hash_bytes).call()
         except Exception as e:
-            if "not found" in str(e).lower():
-                raise BlockchainError(f"Evidence hash {evidence_hash} not found on chain.")
-            raise BlockchainError(f"Failed to read record: {str(e)}")
+            # Differentiate reverting from general RPC errors
+            if "revert" in str(e).lower():
+                raise BlockchainError(f"Contract call reverted for evidence hash: {evidence_hash}")
+            raise BlockchainError(f"RPC failure or contract error: {str(e)}")
+            
+        if record[2] == 0:
+            raise BlockchainError(f"Evidence hash {evidence_hash} not found on chain (zero timestamp).")
+            
+        if record[0] != ev_hash_bytes:
+            raise BlockchainError(f"Stored evidence hash mismatch for {evidence_hash}.")
+            
+        return {
+            "evidenceHashBytes": record[0],
+            "mediaHashBytes": record[1],
+            "timestamp": record[2],
+            "submitter": record[3]
+        }
 
     def verify_against_chain(self, evidence_hash: str, expected_media_hash: str) -> Tuple[bool, str]:
         """
@@ -172,15 +190,18 @@ class BlockchainClient:
         try:
             record = self.read_record(evidence_hash)
             
-            chain_ev = record["evidenceHash"]
-            chain_md = record["mediaHash"]
-            
-            # Allow case-insensitive comparison
-            if chain_ev.lower() != evidence_hash.lower():
-                return False, f"Evidence hash mismatch. Local: {evidence_hash}, Chain: {chain_ev}"
+            norm_md = expected_media_hash.removeprefix("0x").lower()
+            if len(norm_md) != 64:
+                return False, f"Invalid expected media hash length: got {len(norm_md)}"
                 
-            if chain_md.lower() != expected_media_hash.lower():
-                return False, f"Media hash mismatch. Local: {expected_media_hash}, Chain: {chain_md}"
+            try:
+                expected_md_bytes = Web3.to_bytes(hexstr="0x" + norm_md)
+            except ValueError:
+                return False, f"Invalid expected media hash format: {expected_media_hash}"
+                
+            if record["mediaHashBytes"] != expected_md_bytes:
+                chain_md_hex = self.w3.to_hex(record["mediaHashBytes"])
+                return False, f"Media hash mismatch. Local: {norm_md}, Chain: {chain_md_hex}"
                 
             return True, f"Verified on-chain. Anchored by {record['submitter']} at timestamp {record['timestamp']}."
         except BlockchainError as e:
