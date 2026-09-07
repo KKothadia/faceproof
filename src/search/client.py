@@ -12,11 +12,12 @@ from urllib.parse import urlparse
 from src.config import config
 from src.schemas import SearchCandidate
 from src.exceptions import SearchError
+from src.search import cache as search_cache
 
 logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE_BYTES = 500 * 1024  # 500 KB limit for SerpApi Image API
-SEARCH_CACHE_DIR = os.path.join(".cache", "serpapi_search")
+PROVIDER_NAME = "serpapi_google_lens"
 
 class SerpApiClient:
     def __init__(self, api_key: Optional[str] = None):
@@ -179,7 +180,8 @@ class SerpApiClient:
                 "title": item.get("title", ""),
                 "domain": domain,
                 "position": len(candidates) + 1,
-                "match_type": source_type
+                "match_type": source_type,
+                "provider": PROVIDER_NAME
             }
             
             candidates[url] = SearchCandidate(
@@ -210,32 +212,6 @@ class SerpApiClient:
             results = results[:config.MAX_SEARCH_RESULTS]
         return results
 
-    def _cache_path(self, image_hash: str) -> str:
-        return os.path.join(SEARCH_CACHE_DIR, f"{image_hash}.json")
-
-    def _read_cache(self, image_hash: str) -> Optional[Dict[str, Any]]:
-        if not config.SEARCH_CACHE_ENABLED:
-            return None
-        path = self._cache_path(image_hash)
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, ValueError) as e:
-            logger.warning("Ignoring unreadable search cache entry %s: %s", path, e)
-            return None
-
-    def _write_cache(self, image_hash: str, raw_response: Dict[str, Any]) -> None:
-        if not config.SEARCH_CACHE_ENABLED:
-            return
-        try:
-            os.makedirs(SEARCH_CACHE_DIR, exist_ok=True)
-            with open(self._cache_path(image_hash), "w", encoding="utf-8") as f:
-                json.dump(raw_response, f)
-        except OSError as e:
-            logger.warning("Could not write search cache: %s", e)
-
     def search_local_image(self, image: np.ndarray, artifact_dir: Optional[str] = None) -> List[SearchCandidate]:
         """
         Perform the complete reverse-image-search flow. Identical repeated searches for the
@@ -246,14 +222,14 @@ class SerpApiClient:
         """
         image_hash = hashlib.sha256(image.tobytes()).hexdigest()
 
-        raw_response = self._read_cache(image_hash)
+        raw_response = search_cache.read(PROVIDER_NAME, image_hash)
         if raw_response is not None:
             logger.info("Search cache hit for image hash %s - skipping live SerpApi call", image_hash)
         else:
             compressed_bytes = self._compress_image(image)
             image_id = self._upload_image(compressed_bytes)
             raw_response = self._search_google_lens(image_id)
-            self._write_cache(image_hash, raw_response)
+            search_cache.write(PROVIDER_NAME, image_hash, raw_response)
 
         if artifact_dir:
             self._save_artifact(raw_response, artifact_dir)

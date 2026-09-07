@@ -115,21 +115,28 @@ def main():
                 st.session_state.pipeline_result = None
 
                 with st.status("Executing Pipeline...", expanded=True) as status:
-                    pipeline = FaceProofPipeline(face_analyzer=get_face_analyzer())
-                    result = pipeline.run(input_image_path)
-                    st.session_state.pipeline_result = result
-                    
-                    if result.status == "SUCCESS":
-                        status.update(label="Pipeline Completed", state="complete", expanded=False)
-                    else:
-                        status.update(label=f"Pipeline Halted: {result.status}", state="error", expanded=True)
-                        
-                    for event in result.events:
+                    def _render_event_live(event):
+                        # Called synchronously by the pipeline right after each stage
+                        # completes, so the log fills in in real time instead of the UI
+                        # freezing on one spinner until the entire run (search + every
+                        # candidate download + verification + blockchain) is done.
                         dur = f"({event.duration_ms}ms)" if event.duration_ms else ""
                         if event.status == "SUCCESS":
                             st.write(f"✅ **{event.event_type}**: {event.message} {dur}")
                         else:
                             st.write(f"❌ **{event.event_type}**: {event.message} {dur}")
+
+                    pipeline = FaceProofPipeline(face_analyzer=get_face_analyzer())
+                    result = pipeline.run(input_image_path, on_event=_render_event_live)
+                    st.session_state.pipeline_result = result
+
+                    if result.status == "SUCCESS":
+                        status.update(label="Pipeline Completed", state="complete", expanded=False)
+                    else:
+                        label = f"Pipeline Halted: {result.status}"
+                        if result.failure_reason:
+                            label += f" ({result.failure_reason})"
+                        status.update(label=label, state="error", expanded=True)
 
     with col_output:
         result = st.session_state.get("pipeline_result", None)
@@ -163,6 +170,8 @@ def main():
             st.info("○ WEB SEARCH — SKIPPED (face detection failed)")
         elif result.status == "NO_CANDIDATES":
             st.error("✗ WEB SEARCH — No candidates returned")
+            if result.failure_reason:
+                st.caption(f"Reason code: `{result.failure_reason}`")
         else:
             st.success(f"✓ LIVE SEARCH (Provider: Google Lens)")
             st.write(f"Candidates Analyzed: {len(result.verification_results)}")
@@ -173,6 +182,8 @@ def main():
             st.info("○ BLOCKCHAIN — SKIPPED")
             st.markdown("---")
             st.error(f"Pipeline halted at FACE ANALYSIS. Status: **{result.status}**")
+            if result.failure_reason:
+                st.caption(f"Reason code: `{result.failure_reason}`")
             return
 
         st.markdown("---")
@@ -207,6 +218,8 @@ def main():
                     st.write(f"**Threshold:** {best_match_vr.threshold:.3f}")
         elif result.status == "NO_MATCH":
             st.error("✗ NO VERIFIED MATCH FOUND")
+            if result.failure_reason:
+                st.caption(f"Reason code: `{result.failure_reason}`")
             # Show best candidate for diagnostics
             if result.verification_results:
                 best_vr = result.verification_results[0]
@@ -217,7 +230,9 @@ def main():
                 st.write(f"Similarity: {best_vr.confidence_score:.3f}")
                 st.write(f"Threshold: {best_vr.threshold:.3f}")
         else:
-            st.error(f"Pipeline execution halted early. Final Status: {result.status}")            
+            st.error(f"Pipeline execution halted early. Final Status: {result.status}")
+            if result.failure_reason:
+                st.caption(f"Reason code: `{result.failure_reason}`")
         st.markdown("---")
         st.write("### EVIDENCE")
         if result.evidence_hash:

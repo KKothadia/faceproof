@@ -36,7 +36,8 @@ class EvidencePackager:
                         verification_threshold: float,
                         result_status: str,
                         matched_face_index: int = None,
-                        search_request_id: str = None) -> Tuple[EvidenceManifest, str]:
+                        search_request_id: str = None,
+                        search_provider: str = "SerpApi Google Lens") -> Tuple[EvidenceManifest, str]:
         
         # Calculate hashes of raw inputs
         input_sha256 = compute_sha256(input_bytes)
@@ -52,7 +53,7 @@ class EvidencePackager:
             discovered_source=discovered_source,
             discovered_title=discovered_title,
             discovered_image_sha256=candidate_sha256,
-            search_provider="SerpApi Google Lens",
+            search_provider=search_provider,
             search_request_id=search_request_id,
             face_similarity=face_similarity,
             verification_threshold=verification_threshold,

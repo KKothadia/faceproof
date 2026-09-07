@@ -135,7 +135,7 @@ def test_candidates_capped_at_max_search_results(mock_get, mock_post, mock_image
 @patch("requests.get")
 def test_identical_image_search_is_served_from_cache(mock_get, mock_post, mock_image, tmp_path, monkeypatch):
     """A second search for the same image content must not hit the network again."""
-    monkeypatch.setattr("src.search.client.SEARCH_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr("src.search.cache.CACHE_ROOT", str(tmp_path / "cache"))
     monkeypatch.setattr("src.config.config.SEARCH_CACHE_ENABLED", True)
 
     post_resp = MagicMock(spec=Response)

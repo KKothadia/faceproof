@@ -57,6 +57,10 @@ class PipelineEvent(BaseModel):
 class PipelineResult(BaseModel):
     run_id: str
     status: str
+    # Machine-readable code for *why* status is a halting value (e.g. "NO_FACE_DETECTED",
+    # "BELOW_MATCH_THRESHOLD"), distinct from `status` so the UI/logs can show a precise
+    # reason without overloading the terminal-state string itself.
+    failure_reason: Optional[str] = None
     events: List[PipelineEvent]
     reference_face: Optional[FaceResult] = None
     selected_candidate: Optional[SearchCandidate] = None

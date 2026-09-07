@@ -44,6 +44,7 @@ def test_pipeline_fails_on_no_face(mock_dependencies, dummy_image_path):
     result = pipeline.run(dummy_image_path)
         
     assert result.status == "NO_FACE"
+    assert result.failure_reason == "NO_FACE_DETECTED"
     # Ensure SerpApi search is NEVER called when face detection fails
     mock_search.return_value.search_local_image.assert_not_called()
     # Ensure blockchain is NEVER called when earlier stages fail
@@ -59,6 +60,7 @@ def test_pipeline_fails_on_no_candidates(mock_dependencies, dummy_image_path):
     result = pipeline.run(dummy_image_path)
         
     assert result.status == "NO_CANDIDATES"
+    assert result.failure_reason == "ZERO_SEARCH_CANDIDATES"
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
 def test_pipeline_fails_on_no_match(mock_dependencies, dummy_image_path):
@@ -77,6 +79,7 @@ def test_pipeline_fails_on_no_match(mock_dependencies, dummy_image_path):
     result = pipeline.run(dummy_image_path)
         
     assert result.status == "NO_MATCH"
+    assert result.failure_reason == "BELOW_MATCH_THRESHOLD"
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
 def test_pipeline_success_flow(mock_dependencies, dummy_image_path):
@@ -104,10 +107,36 @@ def test_pipeline_success_flow(mock_dependencies, dummy_image_path):
     result = pipeline.run(dummy_image_path)
         
     assert result.status == "SUCCESS"
+    assert result.failure_reason is None
     assert result.final_verified is True
     assert result.transaction_hash == "0xTxHash"
     # Blockchain MUST be called exactly once
     mock_blockchain.return_value.anchor_evidence.assert_called_once_with(evidence_hash="manifest_hash", media_hash="dummy_sha256")
+
+def test_pipeline_on_event_callback_fires_live_for_every_stage(mock_dependencies, dummy_image_path):
+    """The Streamlit UI renders progress via this callback instead of waiting for run() to
+    finish - it must fire once per emitted event, in order, with the real event objects."""
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+
+    mock_face.return_value.analyze_image.return_value = []  # halts at FACE_ANALYSIS
+
+    seen = []
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path, on_event=lambda event: seen.append(event))
+
+    assert [e.event_type for e in seen] == [e.event_type for e in result.events]
+    assert seen[-1].event_type == "FACE_ANALYSIS"
+    assert seen[-1].status == "FAILED"
+
+def test_pipeline_on_event_callback_exception_does_not_break_pipeline(mock_dependencies, dummy_image_path):
+    """A buggy UI callback must never take the pipeline down with it."""
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face.return_value.analyze_image.return_value = []
+
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path, on_event=lambda event: 1 / 0)
+
+    assert result.status == "NO_FACE"
 
 def test_pipeline_fails_gracefully_when_search_client_misconfigured(mock_dependencies, dummy_image_path):
     """

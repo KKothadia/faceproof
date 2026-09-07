@@ -26,6 +26,11 @@ def _get_int(name: str, default: str) -> int:
 
 class Config:
     SERPAPI_API_KEY: str = os.getenv("SERPAPI_API_KEY", "")
+    # Optional second search provider (Google Cloud Vision Web Detection). If unset, the
+    # pipeline runs with SerpApi/Google Lens alone, exactly as before - this is a fallback,
+    # not a requirement. Free tier: 1,000 lookups/month. See README "Search provider and
+    # its limitations" for how to obtain one at no cost.
+    GOOGLE_VISION_API_KEY: str = os.getenv("GOOGLE_VISION_API_KEY", "")
     BASE_SEPOLIA_RPC_URL: str = os.getenv("BASE_SEPOLIA_RPC_URL", "https://sepolia.base.org")
     PRIVATE_KEY: str = os.getenv("PRIVATE_KEY", "")
     CONTRACT_ADDRESS: str = os.getenv("CONTRACT_ADDRESS", "")
