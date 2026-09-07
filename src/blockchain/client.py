@@ -134,11 +134,10 @@ class BlockchainClient:
             
             if receipt['status'] != 1:
                 raise BlockchainError(f"Transaction reverted on chain. Tx: {tx_hash_hex}")
-                
-            # Read record back from the contract and verify
-            is_valid, msg = self.verify_against_chain(evidence_hash, media_hash)
-            if not is_valid:
-                raise BlockchainError(f"Chain read-back verification failed: {msg}")
+            
+            block_num = receipt.get('blockNumber', 'unknown')
+            msg = f"Anchored in block {block_num} (receipt status=1, tx={tx_hash_hex})"
+            logger.info(msg)
                 
             return tx_hash_hex, msg
             

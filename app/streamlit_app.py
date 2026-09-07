@@ -82,7 +82,8 @@ def run_tamper_test():
     try:
         client = BlockchainClient()
         record = client.read_record(result.evidence_hash)
-        on_chain_hash = record["evidenceHash"]
+        on_chain_bytes = record["evidenceHashBytes"]
+        on_chain_hash = on_chain_bytes.hex()
         
         col1.metric("LOCAL HASH", f"{tampered_hash[:10]}...{tampered_hash[-10:]}")
         col2.metric("ON-CHAIN HASH", f"{on_chain_hash[:10]}...{on_chain_hash[-10:]}")
@@ -173,7 +174,7 @@ def main():
             if result.failure_reason:
                 st.caption(f"Reason code: `{result.failure_reason}`")
         else:
-            st.success(f"✓ LIVE SEARCH (Provider: Google Lens)")
+            st.success(f"✓ LIVE SEARCH — reverse image search completed")
             st.write(f"Candidates Analyzed: {len(result.verification_results)}")
 
         if face_failed:
@@ -216,6 +217,7 @@ def main():
                     st.write(f"**URL:** {result.selected_candidate.url}")
                     st.write(f"**Similarity:** {best_match_vr.confidence_score:.3f}")
                     st.write(f"**Threshold:** {best_match_vr.threshold:.3f}")
+                    st.write(f"**Margin:** {best_match_vr.confidence_score - best_match_vr.threshold:+.3f}")
         elif result.status == "NO_MATCH":
             st.error("✗ NO VERIFIED MATCH FOUND")
             if result.failure_reason:
@@ -229,6 +231,7 @@ def main():
                 st.write(f"URL: {best_vr.candidate.url}")
                 st.write(f"Similarity: {best_vr.confidence_score:.3f}")
                 st.write(f"Threshold: {best_vr.threshold:.3f}")
+                st.write(f"**Margin:** {best_vr.confidence_score - best_vr.threshold:+.3f}")
         else:
             st.error(f"Pipeline execution halted early. Final Status: {result.status}")
             if result.failure_reason:

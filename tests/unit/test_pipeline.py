@@ -18,6 +18,7 @@ def dummy_image_path(tmp_path, monkeypatch):
 def mock_dependencies(dummy_image_path):
     with patch("src.pipeline.FaceAnalyzer") as mock_face, \
          patch("src.pipeline.SerpApiClient") as mock_search, \
+         patch("src.pipeline.GoogleVisionClient") as mock_vision, \
          patch("src.pipeline.CandidateVerifier") as mock_verify, \
          patch("src.pipeline.EvidencePackager") as mock_packager, \
          patch("src.pipeline.BlockchainClient") as mock_blockchain, \
@@ -32,10 +33,10 @@ def mock_dependencies(dummy_image_path):
         mock_file.read.return_value = b"fakebytes"
         mock_open.return_value.__enter__.return_value = mock_file
 
-        yield mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open
+        yield mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open
 
 def test_pipeline_fails_on_no_face(mock_dependencies, dummy_image_path):
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     # Analyze returns no face
     mock_face.return_value.analyze_image.return_value = []
@@ -51,7 +52,7 @@ def test_pipeline_fails_on_no_face(mock_dependencies, dummy_image_path):
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
 def test_pipeline_fails_on_no_candidates(mock_dependencies, dummy_image_path):
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
     mock_search.return_value.search_local_image.return_value = []
@@ -64,7 +65,7 @@ def test_pipeline_fails_on_no_candidates(mock_dependencies, dummy_image_path):
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
 def test_pipeline_fails_on_no_match(mock_dependencies, dummy_image_path):
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
     mock_search.return_value.search_local_image.return_value = [SearchCandidate(url="http", source="src")]
@@ -83,7 +84,7 @@ def test_pipeline_fails_on_no_match(mock_dependencies, dummy_image_path):
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
 def test_pipeline_success_flow(mock_dependencies, dummy_image_path):
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
     mock_search.return_value.search_local_image.return_value = [SearchCandidate(url="http", source="src")]
@@ -116,7 +117,7 @@ def test_pipeline_success_flow(mock_dependencies, dummy_image_path):
 def test_pipeline_on_event_callback_fires_live_for_every_stage(mock_dependencies, dummy_image_path):
     """The Streamlit UI renders progress via this callback instead of waiting for run() to
     finish - it must fire once per emitted event, in order, with the real event objects."""
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
 
     mock_face.return_value.analyze_image.return_value = []  # halts at FACE_ANALYSIS
 
@@ -130,7 +131,7 @@ def test_pipeline_on_event_callback_fires_live_for_every_stage(mock_dependencies
 
 def test_pipeline_on_event_callback_exception_does_not_break_pipeline(mock_dependencies, dummy_image_path):
     """A buggy UI callback must never take the pipeline down with it."""
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     mock_face.return_value.analyze_image.return_value = []
 
     pipeline = FaceProofPipeline()
@@ -144,7 +145,7 @@ def test_pipeline_fails_gracefully_when_search_client_misconfigured(mock_depende
     unhandled exception out of the constructor (mirrors BlockchainClient's degrade-gracefully
     pattern - see src/pipeline.py FaceProofPipeline.__init__).
     """
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
 
     mock_search.side_effect = SearchError("SerpApi API key is not configured or is set to default.")
     mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
@@ -161,7 +162,7 @@ def test_pipeline_fails_gracefully_when_face_models_missing(mock_dependencies, d
     message pointing at scripts/download_models.py), not an unhandled exception - this
     mirrors the SerpApiClient/BlockchainClient degrade-gracefully pattern.
     """
-    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
 
     mock_face.side_effect = FaceDetectionError("Detector model not found at models/face_detection_yunet_2023mar.onnx")
 
@@ -171,3 +172,48 @@ def test_pipeline_fails_gracefully_when_face_models_missing(mock_dependencies, d
     assert result.status == "FAILED"
     mock_search.return_value.search_local_image.assert_not_called()
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
+
+
+def test_pipeline_no_match_does_not_call_blockchain(mock_dependencies, dummy_image_path):
+    """Verified: no verified match => blockchain anchor is never called."""
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+
+    mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
+    mock_search.return_value.search_local_image.return_value = [SearchCandidate(url="http://x.com", source="x")]
+    vr = VerificationResult(
+        is_match=False, confidence_score=0.3, candidate=SearchCandidate(url="http://x.com", source="x"),
+        number_of_faces=1, threshold=0.65, pass_reason="Below threshold", artifact_path="path"
+    )
+    mock_verify.return_value.verify_candidates.return_value = [vr]
+
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
+
+    assert result.status == "NO_MATCH"
+    mock_blockchain.return_value.anchor_evidence.assert_not_called()
+
+
+def test_pipeline_verified_match_calls_blockchain_once(mock_dependencies, dummy_image_path):
+    """Verified: verified match => blockchain anchor called exactly once."""
+    mock_face, mock_search, mock_vision, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+
+    mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
+    mock_search.return_value.search_local_image.return_value = [SearchCandidate(url="http://x.com", source="x")]
+    vr = VerificationResult(
+        is_match=True, confidence_score=0.8, candidate=SearchCandidate(url="http://x.com", source="x"),
+        number_of_faces=1, threshold=0.65, pass_reason="Above threshold", artifact_path="path"
+    )
+    mock_verify.return_value.verify_candidates.return_value = [vr]
+
+    class MockManifest:
+        discovered_image_sha256 = "aabbcc"
+    mock_packager.return_value.create_manifest.return_value = (MockManifest(), "evhash")
+    mock_blockchain.return_value.anchor_evidence.return_value = ("0xTx", "OK")
+    mock_blockchain.return_value.verify_against_chain.return_value = (True, "Match")
+    mock_blockchain.return_value.read_record.return_value = {"record": "ok"}
+
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
+
+    assert result.status == "SUCCESS"
+    mock_blockchain.return_value.anchor_evidence.assert_called_once()

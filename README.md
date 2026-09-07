@@ -90,7 +90,7 @@ Known limitations that remain even with the fallback configured:
 
 ## Setup
 1. Clone the repository.
-2. Create a virtual environment: `python -m venv .venv` and activate it.
+2. Create a virtual environment: `python -m venv .venv` and activate it '.\.venv\Scripts\activate.bat'
 3. Install dependencies: `pip install -r requirements.txt`
 4. Copy `.env.example` to `.env` and fill in `SERPAPI_API_KEY` (get one at
    [serpapi.com](https://serpapi.com/manage-api-key)). Optionally also set

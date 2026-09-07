@@ -33,7 +33,12 @@ class GoogleVisionClient:
     """
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or config.GOOGLE_VISION_API_KEY
+        # If caller explicitly passes a key (even empty string), use it directly;
+        # only fall back to env config when the parameter is None.
+        if api_key is not None:
+            self.api_key = api_key
+        else:
+            self.api_key = config.GOOGLE_VISION_API_KEY
         if not self.api_key or self.api_key == "your_google_vision_api_key_here":
             raise SearchError("Google Cloud Vision API key is not configured.")
         self.timeout = 15

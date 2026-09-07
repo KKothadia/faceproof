@@ -121,3 +121,112 @@ def test_skips_invalid_media(reference_face):
     
     # Invalid candidates are silently rejected and not present in results
     assert len(results) == 0
+
+
+def test_below_threshold_no_match():
+    """Explicit: score below threshold => is_match=False"""
+    mock_analyzer = MagicMock()
+    mock_downloader = MagicMock()
+    mock_downloader.download_candidate_media.return_value = create_dummy_media()
+
+    candidate_face = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.1, 0.2, 0.3])
+    mock_analyzer.analyze_image.return_value = [candidate_face]
+    mock_analyzer.compare_features.return_value = 0.3  # below threshold
+
+    ref = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.1, 0.2, 0.3])
+    candidate = SearchCandidate(url="http://test.com", source="test")
+
+    verifier = CandidateVerifier(face_analyzer=mock_analyzer, downloader=mock_downloader)
+    verifier.threshold = 0.65
+
+    results = verifier.verify_candidates(ref, [candidate], "tmp")
+    assert len(results) == 1
+    assert results[0].is_match is False
+    assert results[0].confidence_score == 0.3
+
+
+def test_above_threshold_is_match():
+    """Explicit: score >= threshold => is_match=True"""
+    mock_analyzer = MagicMock()
+    mock_downloader = MagicMock()
+    mock_downloader.download_candidate_media.return_value = create_dummy_media()
+
+    candidate_face = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.1, 0.2, 0.3])
+    mock_analyzer.analyze_image.return_value = [candidate_face]
+    mock_analyzer.compare_features.return_value = 0.8  # above threshold
+
+    ref = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.1, 0.2, 0.3])
+    candidate = SearchCandidate(url="http://test.com", source="test")
+
+    verifier = CandidateVerifier(face_analyzer=mock_analyzer, downloader=mock_downloader)
+    verifier.threshold = 0.65
+
+    results = verifier.verify_candidates(ref, [candidate], "tmp")
+    assert len(results) == 1
+    assert results[0].is_match is True
+    assert results[0].confidence_score == 0.8
+
+
+def test_best_candidate_below_threshold_but_another_passes():
+    """The highest-ranked candidate may be below threshold while another passes."""
+    mock_analyzer = MagicMock()
+    mock_downloader = MagicMock()
+    mock_downloader.download_candidate_media.return_value = create_dummy_media()
+
+    face_low = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.1])
+    face_high = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.9])
+
+    mock_analyzer.analyze_image.side_effect = [[face_low], [face_high]]
+
+    def compare(f1, f2):
+        if f2 == [0.1]: return 0.3  # below threshold
+        if f2 == [0.9]: return 0.9  # above threshold
+        return 0.0
+    mock_analyzer.compare_features.side_effect = compare
+
+    ref = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.5])
+    cands = [
+        SearchCandidate(url="http://low.com", source="low", metadata={"position": 1}),
+        SearchCandidate(url="http://high.com", source="high", metadata={"position": 2}),
+    ]
+
+    verifier = CandidateVerifier(face_analyzer=mock_analyzer, downloader=mock_downloader)
+    verifier.threshold = 0.65
+
+    results = verifier.verify_candidates(ref, cands, "tmp")
+    passed = [r for r in results if r.is_match]
+    assert len(passed) == 1
+    assert passed[0].candidate.url == "http://high.com"
+    assert results[0].candidate.url == "http://high.com"  # highest score = rank 1
+
+
+def test_multi_face_candidate_uses_strongest_score():
+    """With multiple faces in a candidate, the strongest score should be selected."""
+    mock_analyzer = MagicMock()
+    mock_downloader = MagicMock()
+    mock_downloader.download_candidate_media.return_value = create_dummy_media()
+
+    face_a = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.1])
+    face_b = FaceResult(bbox=[0,0,20,20], landmarks=[[0,0]]*5, confidence=0.8, feature_vector=[0.9])
+    mock_analyzer.analyze_image.return_value = [face_a, face_b]
+
+    call_count = [0]
+    def compare(f1, f2):
+        call_count[0] += 1
+        if f2 == [0.1]: return 0.3
+        if f2 == [0.9]: return 0.85
+        return 0.0
+    mock_analyzer.compare_features.side_effect = compare
+
+    ref = FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9, feature_vector=[0.5])
+    candidate = SearchCandidate(url="http://multi.com", source="multi")
+
+    verifier = CandidateVerifier(face_analyzer=mock_analyzer, downloader=mock_downloader)
+    verifier.threshold = 0.65
+
+    results = verifier.verify_candidates(ref, [candidate], "tmp")
+    assert len(results) == 1
+    assert results[0].confidence_score == 0.85  # strongest
+    assert results[0].matched_face_index == 1  # second face (index 1)
+    assert results[0].number_of_faces == 2
+    assert results[0].is_match is True

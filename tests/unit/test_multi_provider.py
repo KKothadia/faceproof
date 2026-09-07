@@ -101,3 +101,35 @@ def test_error_then_clean_empty_result_returns_empty_not_error(image):
 
     client = MultiProviderSearchClient([primary, secondary])
     assert client.search_local_image(image) == []
+
+
+def test_duplicate_provider_results_combined(image):
+    """Both providers can return candidates; multi_provider returns first provider's results
+    when they are non-empty (no cross-provider dedup needed at this layer)."""
+    primary = MagicMock()
+    primary.search_local_image.return_value = [
+        _candidate("https://example.com/a"),
+        _candidate("https://example.com/b"),
+    ]
+    secondary = MagicMock()
+
+    client = MultiProviderSearchClient([primary, secondary])
+    results = client.search_local_image(image)
+
+    # Primary wins; secondary never called
+    assert len(results) == 2
+    secondary.search_local_image.assert_not_called()
+
+
+def test_provider_failure_fallback_to_secondary(image):
+    """SearchError from primary triggers fallback to secondary."""
+    primary = MagicMock()
+    primary.search_local_image.side_effect = SearchError("rate limited")
+    secondary = MagicMock()
+    secondary.search_local_image.return_value = [_candidate("https://fallback.com")]
+
+    client = MultiProviderSearchClient([primary, secondary])
+    results = client.search_local_image(image)
+
+    assert len(results) == 1
+    assert results[0].url == "https://fallback.com"

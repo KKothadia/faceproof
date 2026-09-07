@@ -14,6 +14,7 @@ class SearchCandidate(BaseModel):
     url: str
     source: str
     thumbnail_url: Optional[str] = None
+    image_url: Optional[str] = None  # direct image URL if different from url
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class VerificationResult(BaseModel):
