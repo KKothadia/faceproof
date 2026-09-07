@@ -29,6 +29,16 @@ artifacts/*
 input/*
 !input/.gitkeep
 
+# Logs
+logs/
+
+# On-disk search response cache (src/search/client.py)
+.cache/
+
+# Stray debug/output dumps (accidentally committed in the past - see RELEASE_AUDIT.md)
+project_tree.txt
+serpapi_response_*.json
+
 # IDE
 .vscode/
 .idea/

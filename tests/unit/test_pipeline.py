@@ -4,9 +4,18 @@ from unittest.mock import patch, MagicMock
 
 from src.pipeline import FaceProofPipeline
 from src.schemas import PipelineResult, SearchCandidate, FaceResult, VerificationResult
+from src.exceptions import SearchError, FaceDetectionError
 
 @pytest.fixture
-def mock_dependencies():
+def dummy_image_path(tmp_path, monkeypatch):
+    """Real file + isolated cwd so os.makedirs/os.path.exists behave normally (not globally mocked)."""
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "dummy.jpg"
+    path.write_bytes(b"not-a-real-jpeg")
+    return str(path)
+
+@pytest.fixture
+def mock_dependencies(dummy_image_path):
     with patch("src.pipeline.FaceAnalyzer") as mock_face, \
          patch("src.pipeline.SerpApiClient") as mock_search, \
          patch("src.pipeline.CandidateVerifier") as mock_verify, \
@@ -15,25 +24,24 @@ def mock_dependencies():
          patch("src.pipeline.cv2.imread") as mock_imread, \
          patch("src.pipeline.cv2.imdecode") as mock_imdecode, \
          patch("builtins.open", new_callable=MagicMock) as mock_open:
-             
+
         mock_imdecode.return_value = "dummy_image"
-        
+
         # When context manager is entered, return the mock file object which returns bytes on read
         mock_file = MagicMock()
         mock_file.read.return_value = b"fakebytes"
         mock_open.return_value.__enter__.return_value = mock_file
-        
+
         yield mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open
 
-def test_pipeline_fails_on_no_face(mock_dependencies):
+def test_pipeline_fails_on_no_face(mock_dependencies, dummy_image_path):
     mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     # Analyze returns no face
     mock_face.return_value.analyze_image.return_value = []
     
-    with patch("os.path.exists", return_value=True):
-        pipeline = FaceProofPipeline()
-        result = pipeline.run("dummy.jpg")
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
         
     assert result.status == "NO_FACE"
     # Ensure SerpApi search is NEVER called when face detection fails
@@ -41,20 +49,19 @@ def test_pipeline_fails_on_no_face(mock_dependencies):
     # Ensure blockchain is NEVER called when earlier stages fail
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
-def test_pipeline_fails_on_no_candidates(mock_dependencies):
+def test_pipeline_fails_on_no_candidates(mock_dependencies, dummy_image_path):
     mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
     mock_search.return_value.search_local_image.return_value = []
     
-    with patch("os.path.exists", return_value=True):
-        pipeline = FaceProofPipeline()
-        result = pipeline.run("dummy.jpg")
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
         
     assert result.status == "NO_CANDIDATES"
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
-def test_pipeline_fails_on_no_match(mock_dependencies):
+def test_pipeline_fails_on_no_match(mock_dependencies, dummy_image_path):
     mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
@@ -66,14 +73,13 @@ def test_pipeline_fails_on_no_match(mock_dependencies):
     )
     mock_verify.return_value.verify_candidates.return_value = [vr]
     
-    with patch("os.path.exists", return_value=True):
-        pipeline = FaceProofPipeline()
-        result = pipeline.run("dummy.jpg")
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
         
     assert result.status == "NO_MATCH"
     mock_blockchain.return_value.anchor_evidence.assert_not_called()
 
-def test_pipeline_success_flow(mock_dependencies):
+def test_pipeline_success_flow(mock_dependencies, dummy_image_path):
     mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
     
     mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
@@ -94,12 +100,45 @@ def test_pipeline_success_flow(mock_dependencies):
     mock_blockchain.return_value.verify_against_chain.return_value = (True, "Chain match")
     mock_blockchain.return_value.read_record.return_value = {"record": "test"}
     
-    with patch("os.path.exists", return_value=True):
-        pipeline = FaceProofPipeline()
-        result = pipeline.run("dummy.jpg")
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
         
     assert result.status == "SUCCESS"
     assert result.final_verified is True
     assert result.transaction_hash == "0xTxHash"
     # Blockchain MUST be called exactly once
     mock_blockchain.return_value.anchor_evidence.assert_called_once_with(evidence_hash="manifest_hash", media_hash="dummy_sha256")
+
+def test_pipeline_fails_gracefully_when_search_client_misconfigured(mock_dependencies, dummy_image_path):
+    """
+    A missing/invalid SERPAPI_API_KEY must produce a clean FAILED status, not an
+    unhandled exception out of the constructor (mirrors BlockchainClient's degrade-gracefully
+    pattern - see src/pipeline.py FaceProofPipeline.__init__).
+    """
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+
+    mock_search.side_effect = SearchError("SerpApi API key is not configured or is set to default.")
+    mock_face.return_value.analyze_image.return_value = [FaceResult(bbox=[0,0,10,10], landmarks=[[0,0]]*5, confidence=0.9)]
+
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
+
+    assert result.status == "FAILED"
+    mock_blockchain.return_value.anchor_evidence.assert_not_called()
+
+def test_pipeline_fails_gracefully_when_face_models_missing(mock_dependencies, dummy_image_path):
+    """
+    Missing YuNet/SFace ONNX model files must produce a clean FAILED status (with a
+    message pointing at scripts/download_models.py), not an unhandled exception - this
+    mirrors the SerpApiClient/BlockchainClient degrade-gracefully pattern.
+    """
+    mock_face, mock_search, mock_verify, mock_packager, mock_blockchain, mock_open = mock_dependencies
+
+    mock_face.side_effect = FaceDetectionError("Detector model not found at models/face_detection_yunet_2023mar.onnx")
+
+    pipeline = FaceProofPipeline()
+    result = pipeline.run(dummy_image_path)
+
+    assert result.status == "FAILED"
+    mock_search.return_value.search_local_image.assert_not_called()
+    mock_blockchain.return_value.anchor_evidence.assert_not_called()

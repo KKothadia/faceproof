@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import uuid
+import json
 import cv2
 import numpy as np
 from typing import List, Optional, Tuple, Dict, Any
@@ -15,24 +16,41 @@ from src.search.client import SerpApiClient
 from src.verify.verifier import CandidateVerifier
 from src.evidence.packager import EvidencePackager
 from src.blockchain.client import BlockchainClient
-from src.exceptions import FaceProofError, BlockchainError
+from src.config import config
+from src.exceptions import FaceProofError, BlockchainError, ConfigurationError, SearchError, FaceDetectionError
+from src.logging_config import setup_logging
 
+setup_logging()
 logger = logging.getLogger(__name__)
 
 class FaceProofPipeline:
-    def __init__(self, run_id: Optional[str] = None):
+    def __init__(self, run_id: Optional[str] = None, face_analyzer: Optional[FaceAnalyzer] = None):
         self.run_id = run_id or str(uuid.uuid4())
         self.artifact_dir = os.path.join("artifacts", self.run_id)
         os.makedirs(self.artifact_dir, exist_ok=True)
-        
+
         self.events: List[PipelineEvent] = []
-        
-        # Modules
-        self.face_analyzer = FaceAnalyzer()
-        self.search_client = SerpApiClient()
-        self.verifier = CandidateVerifier(face_analyzer=self.face_analyzer)
+
+        # Reused across calls when a caller supplies its own analyzer (e.g. the Streamlit UI
+        # caches this to avoid reloading the YuNet/SFace ONNX models on every rerun).
+        if face_analyzer is not None:
+            self.face_analyzer = face_analyzer
+        else:
+            try:
+                self.face_analyzer = FaceAnalyzer()
+            except FaceDetectionError as e:
+                logger.warning(f"Face analyzer init warning: {e}")
+                self.face_analyzer = None
+
+        try:
+            self.search_client = SerpApiClient()
+        except SearchError as e:
+            logger.warning(f"Search client init warning: {e}")
+            self.search_client = None
+
+        self.verifier = CandidateVerifier(face_analyzer=self.face_analyzer) if self.face_analyzer else None
         self.evidence_packager = EvidencePackager(run_id=self.run_id, artifact_base_dir="artifacts")
-        
+
         try:
             self.blockchain_client = BlockchainClient()
         except BlockchainError as e:
@@ -49,12 +67,38 @@ class FaceProofPipeline:
             details=details
         )
         self.events.append(event)
-        logger.info(f"[{stage}] {status}: {message} ({duration_ms}ms)")
+        log_record = {
+            "run_id": self.run_id,
+            "stage": stage,
+            "status": status,
+            "message": message,
+            "duration_ms": duration_ms,
+        }
+        if details:
+            log_record["details"] = details
+        logger.info(json.dumps(log_record, default=str))
         
     def run(self, image_path: str) -> PipelineResult:
         result = PipelineResult(run_id=self.run_id, status="STARTED", events=self.events)
-        
+
         try:
+            # 0. CONFIGURATION VALIDATION
+            start = time.time()
+            try:
+                config.validate()
+            except ConfigurationError as e:
+                self._emit("CONFIG", "FAILED", str(e), start)
+                result.status = "FAILED"
+                return result
+
+            if not self.face_analyzer:
+                self._emit(
+                    "CONFIG", "FAILED",
+                    "Face analysis models not available (run scripts/download_models.py)", start
+                )
+                result.status = "FAILED"
+                return result
+
             # 1. INPUT IMAGE -> FACE DETECT -> FACE ENCODE
             start = time.time()
             if not os.path.exists(image_path):
@@ -75,7 +119,10 @@ class FaceProofPipeline:
                 
             faces = self.face_analyzer.analyze_image(image)
             if not faces:
-                self._emit("FACE_ANALYSIS", "FAILED", "No faces detected in input image", start)
+                self._emit(
+                    "FACE_ANALYSIS", "FAILED", "No faces detected in input image", start,
+                    details={"detection_threshold": config.FACE_DETECTION_THRESHOLD}
+                )
                 result.status = "NO_FACE"
                 return result
                 
@@ -85,9 +132,17 @@ class FaceProofPipeline:
             
             # 4, 5, 6. SERPAPI UPLOAD -> GOOGLE LENS SEARCH -> CANDIDATE NORMALIZATION
             start = time.time()
+            if not self.search_client:
+                self._emit("SEARCH", "FAILED", "Search client not initialized (missing/invalid SERPAPI_API_KEY)", start)
+                result.status = "FAILED"
+                return result
+
             candidates = self.search_client.search_local_image(image, artifact_dir=self.artifact_dir)
             if not candidates:
-                self._emit("SEARCH", "FAILED", "No candidates returned from search", start)
+                self._emit(
+                    "SEARCH", "FAILED", "No candidates returned from search", start,
+                    details={"provider": "SerpApi Google Lens"}
+                )
                 result.status = "NO_CANDIDATES"
                 return result
                 
@@ -104,7 +159,15 @@ class FaceProofPipeline:
             
             passed_matches = [vr for vr in verification_results if vr.is_match]
             if not passed_matches:
-                self._emit("VERIFICATION", "FAILED", "No candidates passed identity verification", start)
+                best = verification_results[0] if verification_results else None
+                self._emit(
+                    "VERIFICATION", "FAILED", "No candidates passed identity verification", start,
+                    details={
+                        "candidates_checked": len(verification_results),
+                        "best_score": best.confidence_score if best else None,
+                        "threshold": self.verifier.threshold,
+                    }
+                )
                 result.status = "NO_MATCH"
                 return result
                 

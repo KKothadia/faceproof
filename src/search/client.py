@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import logging
 import cv2
 import numpy as np
@@ -12,18 +13,17 @@ from src.config import config
 from src.schemas import SearchCandidate
 from src.exceptions import SearchError
 
-# Configure structured logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE_BYTES = 500 * 1024  # 500 KB limit for SerpApi Image API
+SEARCH_CACHE_DIR = os.path.join(".cache", "serpapi_search")
 
 class SerpApiClient:
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or config.SERPAPI_API_KEY
         if not self.api_key or self.api_key == "your_serpapi_key_here":
             raise SearchError("SerpApi API key is not configured or is set to default.")
-        self.upload_url = "https://serpapi.com/image" 
+        self.upload_url = "https://serpapi.com/image"
         self.search_url = "https://serpapi.com/search.json"
         self.timeout = 15
 
@@ -200,16 +200,62 @@ class SerpApiClient:
         # Parse organic results
         for item in raw_response.get("organic_results", []):
             add_result(item, "organic_result")
-            
-        return list(candidates.values())
+
+        results = list(candidates.values())
+        if len(results) > config.MAX_SEARCH_RESULTS:
+            logger.info(
+                "Capping %d candidates to MAX_SEARCH_RESULTS=%d",
+                len(results), config.MAX_SEARCH_RESULTS
+            )
+            results = results[:config.MAX_SEARCH_RESULTS]
+        return results
+
+    def _cache_path(self, image_hash: str) -> str:
+        return os.path.join(SEARCH_CACHE_DIR, f"{image_hash}.json")
+
+    def _read_cache(self, image_hash: str) -> Optional[Dict[str, Any]]:
+        if not config.SEARCH_CACHE_ENABLED:
+            return None
+        path = self._cache_path(image_hash)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError) as e:
+            logger.warning("Ignoring unreadable search cache entry %s: %s", path, e)
+            return None
+
+    def _write_cache(self, image_hash: str, raw_response: Dict[str, Any]) -> None:
+        if not config.SEARCH_CACHE_ENABLED:
+            return
+        try:
+            os.makedirs(SEARCH_CACHE_DIR, exist_ok=True)
+            with open(self._cache_path(image_hash), "w", encoding="utf-8") as f:
+                json.dump(raw_response, f)
+        except OSError as e:
+            logger.warning("Could not write search cache: %s", e)
 
     def search_local_image(self, image: np.ndarray, artifact_dir: Optional[str] = None) -> List[SearchCandidate]:
-        """Perform the complete reverse-image-search flow."""
-        compressed_bytes = self._compress_image(image)
-        image_id = self._upload_image(compressed_bytes)
-        raw_response = self._search_google_lens(image_id)
-        
+        """
+        Perform the complete reverse-image-search flow. Identical repeated searches for the
+        same input image (by content hash) are served from a local on-disk cache instead of
+        re-hitting SerpApi, to save API quota across iterative demo/testing runs - this never
+        substitutes a *different* image's result, so it doesn't compromise the "genuine search"
+        requirement.
+        """
+        image_hash = hashlib.sha256(image.tobytes()).hexdigest()
+
+        raw_response = self._read_cache(image_hash)
+        if raw_response is not None:
+            logger.info("Search cache hit for image hash %s - skipping live SerpApi call", image_hash)
+        else:
+            compressed_bytes = self._compress_image(image)
+            image_id = self._upload_image(compressed_bytes)
+            raw_response = self._search_google_lens(image_id)
+            self._write_cache(image_hash, raw_response)
+
         if artifact_dir:
             self._save_artifact(raw_response, artifact_dir)
-            
+
         return self._parse_candidates(raw_response)

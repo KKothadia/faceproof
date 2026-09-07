@@ -2,17 +2,56 @@ import streamlit as st
 import tempfile
 import os
 import json
+import atexit
 import cv2
 import pandas as pd
 import numpy as np
 
 from src.pipeline import FaceProofPipeline
+from src.face.analyzer import FaceAnalyzer
 from src.config import config
 from src.evidence.packager import canonicalize_json, compute_sha256
 from src.blockchain.client import BlockchainClient
-from src.exceptions import BlockchainError
+from src.exceptions import BlockchainError, FaceDetectionError
+from src.logging_config import setup_logging
+
+setup_logging()
 
 st.set_page_config(page_title="FaceProof - HH Goa 2026", layout="wide", page_icon="🕵️")
+
+@st.cache_resource(show_spinner="Loading face detection models...")
+def get_face_analyzer():
+    """
+    Load the YuNet/SFace ONNX models once per Streamlit process instead of on every
+    'RUN PIPELINE' click - model loading from disk is the most expensive fixed cost
+    in each run. Returns None (rather than raising) if the model files aren't present,
+    so a missing model surfaces as a clean pipeline FAILED state instead of crashing
+    the Streamlit callback.
+    """
+    try:
+        return FaceAnalyzer()
+    except FaceDetectionError as e:
+        st.session_state["_face_analyzer_error"] = str(e)
+        return None
+
+def _cleanup_temp_file(path: str) -> None:
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+def _stage_uploaded_file(uploaded_file) -> str:
+    """
+    Save the uploaded biometric image to a temp file, removing any previous upload's
+    temp file first so we don't accumulate face images on disk across reruns/sessions.
+    """
+    _cleanup_temp_file(st.session_state.get("input_path"))
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+        tmp_file.write(uploaded_file.getvalue())
+        path = tmp_file.name
+    atexit.register(_cleanup_temp_file, path)
+    return path
 
 def run_tamper_test():
     result = st.session_state.get("pipeline_result")
@@ -67,19 +106,16 @@ def main():
         uploaded_file = st.file_uploader("", type=["jpg", "jpeg", "png"])
         
         if uploaded_file is not None:
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                input_image_path = tmp_file.name
-                
+            input_image_path = _stage_uploaded_file(uploaded_file)
+            st.session_state.input_path = input_image_path
+
             st.image(input_image_path, caption="Input Face", use_container_width=True)
-            
+
             if st.button("RUN PIPELINE", type="primary", use_container_width=True):
                 st.session_state.pipeline_result = None
-                st.session_state.input_path = input_image_path
-                
+
                 with st.status("Executing Pipeline...", expanded=True) as status:
-                    pipeline = FaceProofPipeline()
+                    pipeline = FaceProofPipeline(face_analyzer=get_face_analyzer())
                     result = pipeline.run(input_image_path)
                     st.session_state.pipeline_result = result
                     

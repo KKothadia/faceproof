@@ -87,6 +87,82 @@ def test_rate_limit(mock_post, mock_image):
     with pytest.raises(SearchError, match="Rate limit exceeded"):
         client.search_local_image(mock_image)
         
+@patch("requests.post")
+@patch("requests.get")
+def test_malformed_response_returns_empty_list(mock_get, mock_post, mock_image):
+    """A response missing all expected keys must not crash - just yield zero candidates."""
+    post_resp = MagicMock(spec=Response)
+    post_resp.status_code = 200
+    post_resp.json.return_value = {"image_id": "dummy_123"}
+    mock_post.return_value = post_resp
+
+    get_resp = MagicMock(spec=Response)
+    get_resp.status_code = 200
+    get_resp.json.return_value = {"search_metadata": {"status": "Success"}}  # no match keys at all
+    mock_get.return_value = get_resp
+
+    client = SerpApiClient(api_key="test_key")
+    results = client.search_local_image(mock_image)
+
+    assert results == []
+
+@patch("requests.post")
+@patch("requests.get")
+def test_candidates_capped_at_max_search_results(mock_get, mock_post, mock_image):
+    """A large result set must be capped so downstream download/verification stays bounded."""
+    from src.config import config as app_config
+
+    post_resp = MagicMock(spec=Response)
+    post_resp.status_code = 200
+    post_resp.json.return_value = {"image_id": "dummy_123"}
+    mock_post.return_value = post_resp
+
+    many_matches = [
+        {"link": f"https://example.com/match{i}", "title": f"Match {i}"}
+        for i in range(app_config.MAX_SEARCH_RESULTS + 15)
+    ]
+    get_resp = MagicMock(spec=Response)
+    get_resp.status_code = 200
+    get_resp.json.return_value = {"visual_matches": many_matches}
+    mock_get.return_value = get_resp
+
+    client = SerpApiClient(api_key="test_key")
+    results = client.search_local_image(mock_image)
+
+    assert len(results) == app_config.MAX_SEARCH_RESULTS
+
+@patch("requests.post")
+@patch("requests.get")
+def test_identical_image_search_is_served_from_cache(mock_get, mock_post, mock_image, tmp_path, monkeypatch):
+    """A second search for the same image content must not hit the network again."""
+    monkeypatch.setattr("src.search.client.SEARCH_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr("src.config.config.SEARCH_CACHE_ENABLED", True)
+
+    post_resp = MagicMock(spec=Response)
+    post_resp.status_code = 200
+    post_resp.json.return_value = {"image_id": "dummy_123"}
+    mock_post.return_value = post_resp
+
+    get_resp = MagicMock(spec=Response)
+    get_resp.status_code = 200
+    get_resp.json.return_value = {
+        "visual_matches": [{"link": "https://example.com/cached", "title": "Cached match"}]
+    }
+    mock_get.return_value = get_resp
+
+    client = SerpApiClient(api_key="test_key")
+
+    first = client.search_local_image(mock_image)
+    assert mock_post.call_count == 1
+    assert mock_get.call_count == 1
+    assert first[0].url == "https://example.com/cached"
+
+    second = client.search_local_image(mock_image)
+    # No additional network calls for the identical image
+    assert mock_post.call_count == 1
+    assert mock_get.call_count == 1
+    assert second[0].url == "https://example.com/cached"
+
 def test_large_image_compression():
     """Test logic for compressing an oversized image."""
     # Create large image
